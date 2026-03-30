@@ -33,7 +33,6 @@ import expo.modules.kotlin.modules.ModuleDefinition
 import org.json.JSONObject
 import java.text.NumberFormat
 import java.util.Locale
-import kotlin.math.absoluteValue
 
 class KmCertoNativeModule : Module() {
   override fun definition() = ModuleDefinition {
@@ -59,14 +58,10 @@ class KmCertoNativeModule : Module() {
         val intent = Intent(
           Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
           Uri.parse("package:${ctx.packageName}"),
-        ).apply {
-          addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
+        ).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
         ctx.startActivity(intent)
         true
-      } catch (_: Throwable) {
-        false
-      }
+      } catch (_: Throwable) { false }
     }
 
     AsyncFunction("openAccessibilitySettings") {
@@ -78,9 +73,7 @@ class KmCertoNativeModule : Module() {
         }
         ctx.startActivity(intent)
         true
-      } catch (_: Throwable) {
-        false
-      }
+      } catch (_: Throwable) { false }
     }
 
     AsyncFunction("startMonitoring") {
@@ -164,22 +157,17 @@ object KmCertoRuntime {
 
   fun setMinimumPerKm(context: Context, value: Double) {
     context.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
-      .edit()
-      .putFloat(KEY_MINIMUM_PER_KM, value.toFloat())
-      .apply()
+      .edit().putFloat(KEY_MINIMUM_PER_KM, value.toFloat()).apply()
   }
 
   fun getMinimumPerKm(context: Context): Double {
-    val stored = context.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
-      .getFloat(KEY_MINIMUM_PER_KM, DEFAULT_MINIMUM_PER_KM.toFloat())
-    return stored.toDouble()
+    return context.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+      .getFloat(KEY_MINIMUM_PER_KM, DEFAULT_MINIMUM_PER_KM.toFloat()).toDouble()
   }
 
   fun setMonitoringEnabled(context: Context, enabled: Boolean) {
     context.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
-      .edit()
-      .putBoolean(KEY_MONITORING_ENABLED, enabled)
-      .apply()
+      .edit().putBoolean(KEY_MONITORING_ENABLED, enabled).apply()
   }
 
   fun isMonitoringEnabled(context: Context): Boolean {
@@ -188,13 +176,15 @@ object KmCertoRuntime {
   }
 
   fun supportsPackage(packageName: String): Boolean {
-    return supportedPackages.keys.any { key -> packageName == key || packageName.startsWith("$key:") }
+    return supportedPackages.keys.any { key ->
+      packageName == key || packageName.startsWith("$key:")
+    }
   }
 
   fun sourceLabel(packageName: String): String {
-    return supportedPackages.entries.firstOrNull { packageName == it.key || packageName.startsWith("${it.key}:") }
-      ?.value
-      ?: packageName.substringAfterLast('.')
+    return supportedPackages.entries
+      .firstOrNull { packageName == it.key || packageName.startsWith("${it.key}:") }
+      ?.value ?: packageName.substringAfterLast('.')
   }
 }
 
@@ -242,9 +232,7 @@ data class OfferDecisionData(
           sourceApp = payload.optString("sourceApp", "KmCerto"),
           rawText = payload.optString("rawText", ""),
         )
-      } catch (_: Throwable) {
-        null
-      }
+      } catch (_: Throwable) { null }
     }
   }
 }
@@ -253,140 +241,94 @@ object KmCertoOfferParser {
   private const val TAG = "KmCerto"
   private val locale = Locale("pt", "BR")
 
-  // === REGEX PRINCIPAL: R$ seguido de valor ===
-  // Aceita: R$ 16,20 | R$16,20 | R$ 32.79 | R$11,66
-  // Também aceita separadores como " | ", espaços, tabs, etc entre R$ e o número
+  // Captura R$ seguido de número, tolerando qualquer espaço/caractere invisível
+  // Cobre: "R$6,70" | "R$ 11,66" | "R$\u00a011,66" | "R$ 6.70"
   private val currencyRegex = Regex(
-    """R\$\s*[|\s]*(\d{1,4}(?:\.\d{3})*,\d{2}|\d+[.,]\d{1,2})"""
+    """R\$[\s\u00a0\u202f\u2009]*(\d{1,4}(?:[.,]\d{3})*[.,]\d{2}|\d{1,4}[.,]\d{1,2}|\d{2,4})"""
   )
 
-  // === REGEX FALLBACK: valor monetário sem R$ ===
-  // Para quando o "R$" está em um nó separado do número
-  // Captura números no formato XX,XX (2 casas decimais com vírgula) que parecem valores monetários
-  private val bareMoneyRegex = Regex(
-    """(?<!\d)(\d{1,4},\d{2})(?!\d)"""
+  // Captura todos os km na tela — serão SOMADOS
+  // Cobre: "5,4km" | "7.5 km" | "4,7km" | "10,1 km"
+  private val kmRegex = Regex(
+    """(\d{1,3}[.,]\d{1,2}|\d{1,3})\s*km\b""",
+    RegexOption.IGNORE_CASE
   )
 
-  // Regex para capturar distância em km: 16,9km ou 13.9 km ou 2,2km ou 29.3 km
-  private val kmRegex = Regex("""(\d{1,4}[.,]\d{1,2})\s*km""", RegexOption.IGNORE_CASE)
-
-  // Regex para capturar minutos: 28min ou 30 min ou 7min ou 48 min
+  // Captura minutos — serão SOMADOS
   private val minuteRegex = Regex("""(\d{1,3})\s*min""", RegexOption.IGNORE_CASE)
 
   fun parse(context: Context?, rawText: String, minimumPerKm: Double, sourcePackage: String): OfferDecisionData? {
-    // Normalizar: remover quebras de linha, múltiplos espaços
     val normalizedText = rawText.replace("\n", " ").replace(Regex("\\s+"), " ").trim()
     if (normalizedText.isBlank()) return null
 
     Log.d(TAG, "=== PARSE START ===")
     Log.d(TAG, "Package: $sourcePackage")
-    Log.d(TAG, "Text (first 500): ${normalizedText.take(500)}")
+    Log.d(TAG, "Text (500): ${normalizedText.take(500)}")
 
-    // ========================================================
-    // PASSO 1: Extrair distância em KM (precisa ter km para ser oferta)
-    // ========================================================
-    val kmMatches = kmRegex.findAll(normalizedText).toList()
-    Log.d(TAG, "KM matches: ${kmMatches.map { it.value }}")
-
-    val distances = kmMatches.mapNotNull { it.groupValues.getOrNull(1)?.let(::parsePtBrNumber) }
-      .filter { it > 0 && it.isFinite() }
-    Log.d(TAG, "Parsed distances: $distances")
-
-    // Se não tem KM, não é uma oferta de corrida - sair silenciosamente
-    if (distances.isEmpty()) {
-      Log.d(TAG, "No KM found - not a ride offer, skipping")
-      return null
-    }
-
-    // Usar a MAIOR distância (distância total)
-    val distance = distances.maxOrNull()!!
-
-    // ========================================================
-    // PASSO 2: Extrair valor em R$
-    // ========================================================
-    var fare: Double? = null
-    var fareSource = ""
-
-    // Tentativa 1: Regex principal com R$
+    // ── 1. Extrair valor R$ ──────────────────────────────────────────────────
     val fareMatch = currencyRegex.find(normalizedText)
-    if (fareMatch != null) {
-      fare = fareMatch.groupValues.getOrNull(1)?.let(::parsePtBrNumber)
-      fareSource = "regex R$"
-      Log.d(TAG, "Fare (R$ regex): '${fareMatch.value}' -> $fare")
-    }
+    var fare = fareMatch?.groupValues?.getOrNull(1)?.let(::parsePtBrNumber)
+    Log.d(TAG, "Fare match: '${fareMatch?.value}' -> $fare")
 
-    // Tentativa 2: Se não achou com R$, procurar "R$" e número em nós separados
-    // O texto vem como "nó1 | nó2 | nó3", então R$ pode estar em um nó e o valor em outro
+    // Fallback: R$ e número em nós separados pelo " | "
+    // Ex: partes = ["R$", "6,70", "13min", ...]
     if (fare == null || fare <= 0 || !fare.isFinite()) {
-      // Verificar se existe "R$" em algum lugar do texto
-      val hasRealSign = normalizedText.contains("R$") || normalizedText.contains("R\$")
-      if (hasRealSign) {
-        // Procurar o primeiro número com formato monetário DEPOIS do R$
-        val rIdx = normalizedText.indexOf("R$")
-        if (rIdx >= 0) {
-          val afterR = normalizedText.substring(rIdx + 2)
-          val bareMatch = bareMoneyRegex.find(afterR)
-          if (bareMatch != null) {
-            fare = parsePtBrNumber(bareMatch.groupValues[1])
-            fareSource = "R$ separado"
-            Log.d(TAG, "Fare (R$ separado): '${bareMatch.value}' -> $fare")
-          }
-        }
+      val parts = normalizedText.split("|").map { it.trim() }
+      val rIdx = parts.indexOfFirst { it.contains("R$") }
+      if (rIdx >= 0 && rIdx + 1 < parts.size) {
+        val candidate = parts[rIdx + 1].trim()
+        fare = parsePtBrNumber(candidate)
+        Log.d(TAG, "Fare fallback parts[$rIdx+1]='$candidate' -> $fare")
       }
     }
 
-    // Tentativa 3: Fallback total - procurar qualquer valor XX,XX no texto
-    // Filtrar valores que fazem sentido como preço de corrida (entre 3 e 500)
     if (fare == null || fare <= 0 || !fare.isFinite()) {
-      val allBareValues = bareMoneyRegex.findAll(normalizedText)
-        .mapNotNull { it.groupValues.getOrNull(1)?.let(::parsePtBrNumber) }
-        .filter { it in 3.0..500.0 }
-        .toList()
-      Log.d(TAG, "Bare money values found: $allBareValues")
-
-      if (allBareValues.isNotEmpty()) {
-        // Pegar o primeiro valor razoável (geralmente o valor da corrida aparece primeiro)
-        fare = allBareValues.first()
-        fareSource = "fallback bare"
-        Log.d(TAG, "Fare (fallback): $fare")
-      }
-    }
-
-    // Se mesmo assim não achou, mostrar debug
-    if (fare == null || fare <= 0 || !fare.isFinite()) {
-      Log.d(TAG, "FAIL: No fare found at all")
-      if (context != null) {
-        val preview = normalizedText.take(150)
+      Log.d(TAG, "FAIL: No fare found")
+      context?.let {
         Handler(Looper.getMainLooper()).post {
-          Toast.makeText(context, "KmCerto debug: $preview", Toast.LENGTH_LONG).show()
+          Toast.makeText(it, "KmCerto: Não encontrou R\$ no texto", Toast.LENGTH_SHORT).show()
         }
       }
       return null
     }
 
-    // ========================================================
-    // PASSO 3: Extrair minutos
-    // ========================================================
-    val minMatches = minuteRegex.findAll(normalizedText).toList()
-    val minutes = minMatches.mapNotNull { it.groupValues.getOrNull(1)?.toDoubleOrNull() }
-      .filter { it > 0 }
-      .let { values ->
-        if (values.isEmpty()) null
-        else if (values.size == 1) values.first()
-        else values.sum() // Somar pickup + dropoff
+    // ── 2. Extrair km e SOMAR TODOS ─────────────────────────────────────────
+    // Soma cobre: corrida com 1 trecho, 2 trechos (99/iFood), ou total explícito
+    val distances = kmRegex.findAll(normalizedText)
+      .mapNotNull { it.groupValues.getOrNull(1)?.let(::parsePtBrNumber) }
+      .filter { it > 0 && it.isFinite() }
+      .toList()
+
+    Log.d(TAG, "KM values: $distances")
+    val totalDistance = distances.sum()
+
+    if (totalDistance <= 0) {
+      Log.d(TAG, "FAIL: No distance found")
+      context?.let {
+        Handler(Looper.getMainLooper()).post {
+          Toast.makeText(it, "KmCerto: R\$${formatCurrency(fare)} sem KM", Toast.LENGTH_LONG).show()
+        }
       }
+      return null
+    }
 
-    Log.d(TAG, "Minutes: $minutes")
+    // ── 3. Extrair minutos e SOMAR TODOS ────────────────────────────────────
+    val totalMinutes = minuteRegex.findAll(normalizedText)
+      .mapNotNull { it.groupValues.getOrNull(1)?.toDoubleOrNull() }
+      .filter { it > 0 }
+      .toList()
+      .takeIf { it.isNotEmpty() }
+      ?.sum()
 
-    // ========================================================
-    // PASSO 4: Calcular métricas
-    // ========================================================
-    val perKm = fare / distance
-    val perMinute = if (minutes != null && minutes > 0) fare / minutes else null
-    val perHour = if (minutes != null && minutes > 0) fare / (minutes / 60.0) else null
+    Log.d(TAG, "Total dist: $totalDistance km | Total min: $totalMinutes")
+
+    // ── 4. Calcular R$/km, R$/hr, R$/min ────────────────────────────────────
+    val perKm = fare / totalDistance
+    val perMinute = if (totalMinutes != null && totalMinutes > 0) fare / totalMinutes else null
+    val perHour = if (totalMinutes != null && totalMinutes > 0) fare / (totalMinutes / 60.0) else null
     val shouldAccept = perKm + 0.0001 >= minimumPerKm
 
-    Log.d(TAG, "RESULT: fare=$fare dist=$distance perKm=$perKm accept=$shouldAccept fareSource=$fareSource")
+    Log.d(TAG, "RESULT: fare=$fare dist=$totalDistance perKm=$perKm accept=$shouldAccept")
 
     return OfferDecisionData(
       totalFare = fare,
@@ -424,51 +366,36 @@ object KmCertoOfferParser {
         sourceApp = json.optString("sourceApp", "Teste manual"),
         rawText = json.optString("rawText", ""),
       )
-    } catch (_: Throwable) {
-      null
-    }
+    } catch (_: Throwable) { null }
   }
 
-  /**
-   * Converte número no formato brasileiro para Double.
-   * "16,20" -> 16.20
-   * "12,20" -> 12.20
-   * "16,9" -> 16.9
-   * "13.9" -> 13.9 (sem vírgula, trata ponto como decimal)
-   * "1.234,56" -> 1234.56 (milhar com ponto)
-   */
+  // "6,70" -> 6.70 | "7.5" -> 7.5 | "1.234,56" -> 1234.56
   private fun parsePtBrNumber(raw: String): Double {
     val s = raw.trim()
     if (s.isEmpty()) return Double.NaN
-
-    // Se tem vírgula, é formato BR: ponto é milhar, vírgula é decimal
-    if (s.contains(",")) {
-      return s.replace(".", "").replace(",", ".").toDoubleOrNull() ?: Double.NaN
+    return if (s.contains(",")) {
+      s.replace(".", "").replace(",", ".").toDoubleOrNull() ?: Double.NaN
+    } else {
+      s.toDoubleOrNull() ?: Double.NaN
     }
-
-    // Se não tem vírgula, o ponto é decimal (ex: 13.9, 2.2)
-    return s.toDoubleOrNull() ?: Double.NaN
   }
 
-  private fun formatCurrency(value: Double): String {
-    return NumberFormat.getCurrencyInstance(locale).format(value)
-  }
+  private fun formatCurrency(value: Double): String =
+    NumberFormat.getCurrencyInstance(locale).format(value)
 
-  private fun round2(value: Double): Double {
-    return kotlin.math.round(value * 100.0) / 100.0
-  }
+  private fun round2(value: Double): Double =
+    kotlin.math.round(value * 100.0) / 100.0
 }
 
 class KmCertoAccessibilityService : AccessibilityService() {
   private val TAG = "KmCerto"
   private var lastSignature: String? = null
   private var lastEmissionAt: Long = 0
-  private var lastDebugToastAt: Long = 0
+  private var lastToastAt: Long = 0
 
   override fun onServiceConnected() {
     super.onServiceConnected()
     Log.d(TAG, ">>> AccessibilityService CONNECTED <<<")
-
     serviceInfo = AccessibilityServiceInfo().apply {
       eventTypes = AccessibilityEvent.TYPES_ALL_MASK
       feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
@@ -479,10 +406,9 @@ class KmCertoAccessibilityService : AccessibilityService() {
       packageNames = arrayOf(
         "br.com.ifood.driver.app",
         "com.app99.driver",
-        "com.ubercab.driver"
+        "com.ubercab.driver",
       )
     }
-
     Handler(Looper.getMainLooper()).post {
       Toast.makeText(this, "KmCerto: Serviço de acessibilidade ATIVO!", Toast.LENGTH_LONG).show()
     }
@@ -490,99 +416,61 @@ class KmCertoAccessibilityService : AccessibilityService() {
 
   override fun onAccessibilityEvent(event: AccessibilityEvent?) {
     if (event == null) return
-
     val packageName = event.packageName?.toString() ?: return
-
-    // Verificar se é um dos apps monitorados
     if (!KmCertoRuntime.supportsPackage(packageName)) return
     if (!KmCertoRuntime.isMonitoringEnabled(this)) return
 
     Log.d(TAG, "EVENT from $packageName type=${event.eventType}")
 
-    // ========================================================
-    // COLETA DE TEXTO: Múltiplas estratégias
-    // ========================================================
-    val allTexts = mutableListOf<String>()
-
-    // Estratégia 1: rootInActiveWindow - percorre toda a árvore de views
     val root = try { rootInActiveWindow } catch (_: Throwable) { null }
+    var text = ""
     if (root != null) {
-      val windowTexts = collectAllText(root)
-      if (windowTexts.isNotBlank()) {
-        allTexts.add(windowTexts)
-      }
+      text = collectAllText(root)
       try { root.recycle() } catch (_: Throwable) { }
     }
 
-    // Estratégia 2: Texto do evento
-    event.text?.forEach { t ->
-      val s = t?.toString()?.trim()
-      if (!s.isNullOrBlank() && s !in allTexts) allTexts.add(s)
-    }
-    val cd = event.contentDescription?.toString()?.trim()
-    if (!cd.isNullOrBlank() && cd !in allTexts) allTexts.add(cd)
-
-    // Estratégia 3: source do evento
-    val source = try { event.source } catch (_: Throwable) { null }
-    if (source != null) {
-      val sourceText = collectAllText(source)
-      if (sourceText.isNotBlank() && sourceText !in allTexts) {
-        allTexts.add(sourceText)
+    // Fallback: texto do evento
+    if (text.isBlank()) {
+      val parts = mutableListOf<String>()
+      event.text?.forEach { t ->
+        t?.toString()?.trim()?.takeIf { it.isNotBlank() }?.let { parts.add(it) }
       }
-      try { source.recycle() } catch (_: Throwable) { }
+      event.contentDescription?.toString()?.trim()
+        ?.takeIf { it.isNotBlank() }?.let { parts.add(it) }
+      text = parts.joinToString(" | ")
     }
 
-    val combinedText = allTexts.joinToString(" | ")
-
-    if (combinedText.isBlank()) {
+    if (text.isBlank()) {
       Log.d(TAG, "EMPTY text from $packageName")
       return
     }
 
-    Log.d(TAG, "CAPTURED (${combinedText.length} chars): ${combinedText.take(400)}")
+    Log.d(TAG, "CAPTURED (${text.length} chars): ${text.take(300)}")
 
-    // ========================================================
-    // DEBUG TOAST: Mostrar texto capturado a cada 8 segundos
-    // ========================================================
+    // Toast de debug a cada 5 segundos
     val now = System.currentTimeMillis()
-    if (now - lastDebugToastAt > 8000) {
-      lastDebugToastAt = now
-      val preview = combinedText.take(120).replace("\n", " ")
+    if (now - lastToastAt > 5000) {
+      lastToastAt = now
+      val preview = text.take(120).replace("\n", " ")
       Handler(Looper.getMainLooper()).post {
-        Toast.makeText(this, "KmCerto [$packageName]:\n$preview", Toast.LENGTH_LONG).show()
+        Toast.makeText(this, "[$packageName]: $preview", Toast.LENGTH_SHORT).show()
       }
     }
 
-    // ========================================================
-    // PARSE: Tentar extrair dados da oferta
-    // ========================================================
     val minimumPerKm = KmCertoRuntime.getMinimumPerKm(this)
     val parsed = KmCertoOfferParser.parse(
       context = this,
-      rawText = combinedText,
+      rawText = text,
       minimumPerKm = minimumPerKm,
       sourcePackage = packageName,
-    )
+    ) ?: return
 
-    if (parsed == null) {
-      Log.d(TAG, "PARSE returned null for $packageName")
-      return
-    }
-
-    // Deduplicação: não mostrar overlay repetido
-    val signature = listOf(
-      packageName,
-      parsed.totalFareLabel,
-      parsed.status,
-      parsed.perKm.toString(),
-    ).joinToString("|")
-
+    val signature = "${packageName}|${parsed.totalFareLabel}|${parsed.perKm}"
     if (signature == lastSignature && now - lastEmissionAt < 3500) return
-
     lastSignature = signature
     lastEmissionAt = now
 
-    Log.d(TAG, ">>> SHOWING OVERLAY: ${parsed.totalFareLabel} ${parsed.perKm}/km ${parsed.status} <<<")
+    Log.d(TAG, ">>> OVERLAY: ${parsed.totalFareLabel} ${parsed.perKm}/km ${parsed.status} <<<")
     KmCertoOverlayService.show(this, parsed)
   }
 
@@ -590,25 +478,20 @@ class KmCertoAccessibilityService : AccessibilityService() {
     Log.d(TAG, "AccessibilityService INTERRUPTED")
   }
 
-  /**
-   * Coleta TODO o texto visível da árvore de nós, incluindo text e contentDescription.
-   * Junta com espaço simples (não com " | ") para manter R$ e valor juntos quando possível.
-   */
   private fun collectAllText(root: AccessibilityNodeInfo): String {
     val parts = mutableListOf<String>()
+    val visited = HashSet<Int>()
 
     fun visit(node: AccessibilityNodeInfo?) {
       if (node == null) return
+      val hash = System.identityHashCode(node)
+      if (hash in visited) return
+      visited.add(hash)
 
-      val text = node.text?.toString()?.trim()
-      if (!text.isNullOrBlank()) {
-        parts.add(text)
-      }
-
-      val cd = node.contentDescription?.toString()?.trim()
-      if (!cd.isNullOrBlank() && cd != text) {
-        parts.add(cd)
-      }
+      node.text?.toString()?.trim()?.takeIf { it.isNotBlank() }?.let { parts.add(it) }
+      node.contentDescription?.toString()?.trim()
+        ?.takeIf { it.isNotBlank() && it != node.text?.toString()?.trim() }
+        ?.let { parts.add(it) }
 
       for (i in 0 until node.childCount) {
         try {
@@ -622,21 +505,18 @@ class KmCertoAccessibilityService : AccessibilityService() {
     }
 
     visit(root)
-
-    // IMPORTANTE: Juntar com espaço simples " " em vez de " | "
-    // Isso mantém "R$" e "32,79" juntos como "R$ 32,79" quando estão em nós adjacentes
-    return parts.joinToString(" ")
+    return parts.joinToString(" | ")
   }
 
   companion object {
     fun isEnabled(context: Context): Boolean {
-      val enabledServices = Settings.Secure.getString(
+      val enabled = Settings.Secure.getString(
         context.contentResolver,
         Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES,
       ) ?: return false
       val expected = "${context.packageName}/${KmCertoAccessibilityService::class.java.name}"
       return TextUtils.SimpleStringSplitter(':').run {
-        setString(enabledServices)
+        setString(enabled)
         any { it.equals(expected, ignoreCase = true) }
       }
     }
@@ -658,17 +538,13 @@ class KmCertoOverlayService : Service() {
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
     when (intent?.action) {
       ACTION_HIDE -> {
-        hideOverlayInternal()
-        stopForegroundCompat()
-        stopSelf()
+        hideOverlayInternal(); stopForegroundCompat(); stopSelf()
         return START_NOT_STICKY
       }
       ACTION_SHOW -> {
-        if (!Settings.canDrawOverlays(this)) {
-          stopSelf()
-          return START_NOT_STICKY
-        }
-        val payload = OfferDecisionData.fromJson(intent.getStringExtra(EXTRA_PAYLOAD)) ?: return START_NOT_STICKY
+        if (!Settings.canDrawOverlays(this)) { stopSelf(); return START_NOT_STICKY }
+        val payload = OfferDecisionData.fromJson(intent.getStringExtra(EXTRA_PAYLOAD))
+          ?: return START_NOT_STICKY
         startForegroundInternal()
         showOverlayInternal(payload)
         return START_NOT_STICKY
@@ -686,26 +562,20 @@ class KmCertoOverlayService : Service() {
   private fun startForegroundInternal() {
     val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-      val channel = NotificationChannel(CHANNEL_ID, "KmCerto Overlay", NotificationManager.IMPORTANCE_LOW)
-      channel.description = "Canal do overlay automático do KmCerto."
-      manager.createNotificationChannel(channel)
+      manager.createNotificationChannel(
+        NotificationChannel(CHANNEL_ID, "KmCerto Overlay", NotificationManager.IMPORTANCE_LOW)
+          .apply { description = "Canal do overlay automático do KmCerto." }
+      )
     }
     val notification = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
       Notification.Builder(this, CHANNEL_ID)
-        .setContentTitle("KmCerto ativo")
-        .setContentText("Analisando ofertas e exibindo o overlay temporário.")
-        .setSmallIcon(android.R.drawable.ic_dialog_info)
-        .setOngoing(true)
-        .build()
     } else {
-      @Suppress("DEPRECATION")
-      Notification.Builder(this)
-        .setContentTitle("KmCerto ativo")
-        .setContentText("Analisando ofertas e exibindo o overlay temporário.")
-        .setSmallIcon(android.R.drawable.ic_dialog_info)
-        .setOngoing(true)
-        .build()
-    }
+      @Suppress("DEPRECATION") Notification.Builder(this)
+    }.setContentTitle("KmCerto ativo")
+      .setContentText("Analisando ofertas.")
+      .setSmallIcon(android.R.drawable.ic_dialog_info)
+      .setOngoing(true)
+      .build()
     startForeground(NOTIFICATION_ID, notification)
   }
 
@@ -713,8 +583,7 @@ class KmCertoOverlayService : Service() {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
       stopForeground(STOP_FOREGROUND_REMOVE)
     } else {
-      @Suppress("DEPRECATION")
-      stopForeground(true)
+      @Suppress("DEPRECATION") stopForeground(true)
     }
   }
 
@@ -722,6 +591,7 @@ class KmCertoOverlayService : Service() {
     hideOverlayInternal()
     val manager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
     windowManager = manager
+
     val container = LinearLayout(this).apply {
       orientation = LinearLayout.VERTICAL
       gravity = Gravity.CENTER_HORIZONTAL
@@ -731,13 +601,7 @@ class KmCertoOverlayService : Service() {
         cornerRadius = dp(24).toFloat()
       }
     }
-    val fareText = TextView(this).apply {
-      text = data.totalFareLabel
-      setTextColor(Color.WHITE)
-      setTextSize(TypedValue.COMPLEX_UNIT_SP, 32f)
-      setTypeface(typeface, Typeface.BOLD)
-      gravity = Gravity.CENTER_HORIZONTAL
-    }
+
     val statusText = TextView(this).apply {
       text = data.status
       setTextColor(Color.WHITE)
@@ -750,25 +614,35 @@ class KmCertoOverlayService : Service() {
         cornerRadius = dp(999).toFloat()
       }
     }
+
+    val fareText = TextView(this).apply {
+      text = data.totalFareLabel
+      setTextColor(Color.WHITE)
+      setTextSize(TypedValue.COMPLEX_UNIT_SP, 32f)
+      setTypeface(typeface, Typeface.BOLD)
+      gravity = Gravity.CENTER_HORIZONTAL
+    }
+
     val sourceText = TextView(this).apply {
       text = data.sourceApp
       setTextColor(Color.parseColor("#CFCFD4"))
       setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
       gravity = Gravity.CENTER_HORIZONTAL
     }
+
     val metricRow = LinearLayout(this).apply {
       orientation = LinearLayout.HORIZONTAL
       gravity = Gravity.CENTER
-      val gap = dp(10)
       showDividers = LinearLayout.SHOW_DIVIDER_MIDDLE
       dividerDrawable = GradientDrawable().apply {
-        setSize(gap, 1)
+        setSize(dp(10), 1)
         setColor(Color.TRANSPARENT)
       }
     }
     metricRow.addView(createMetricText("R$/km", data.perKm))
     data.perHour?.let { metricRow.addView(createMetricText("R$/hr", it)) }
     data.perMinute?.let { metricRow.addView(createMetricText("R$/min", it)) }
+
     container.addView(statusText)
     container.addView(spaceView(dp(10)))
     container.addView(fareText)
@@ -776,43 +650,37 @@ class KmCertoOverlayService : Service() {
     container.addView(sourceText)
     container.addView(spaceView(dp(14)))
     container.addView(metricRow)
-    val layoutParams = WindowManager.LayoutParams(
+
+    val lp = WindowManager.LayoutParams(
       WindowManager.LayoutParams.MATCH_PARENT,
       WindowManager.LayoutParams.WRAP_CONTENT,
-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
         WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-      } else {
-        @Suppress("DEPRECATION")
-        WindowManager.LayoutParams.TYPE_PHONE
-      },
+      else @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE,
       WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
         WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
         WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
       PixelFormat.TRANSLUCENT,
     ).apply {
       gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-      x = 0
-      y = dp(72)
+      x = 0; y = dp(72)
       width = WindowManager.LayoutParams.MATCH_PARENT
       horizontalMargin = 0f
     }
+
     try {
-      manager.addView(container, layoutParams)
+      manager.addView(container, lp)
       overlayView = container
       handler.removeCallbacks(dismissRunnable)
       handler.postDelayed(dismissRunnable, AUTO_DISMISS_MS)
     } catch (_: Throwable) {
-      hideOverlayInternal()
-      stopForegroundCompat()
-      stopSelf()
+      hideOverlayInternal(); stopForegroundCompat(); stopSelf()
     }
   }
 
   private fun hideOverlayInternal() {
     handler.removeCallbacks(dismissRunnable)
-    overlayView?.let { view ->
-      try { windowManager?.removeView(view) } catch (_: Throwable) { }
-    }
+    overlayView?.let { try { windowManager?.removeView(it) } catch (_: Throwable) { } }
     overlayView = null
   }
 
@@ -836,13 +704,11 @@ class KmCertoOverlayService : Service() {
     }
   }
 
-  private fun spaceView(height: Int): TextView {
-    return TextView(this).apply { minHeight = height }
-  }
+  private fun spaceView(height: Int): TextView =
+    TextView(this).apply { minHeight = height }
 
-  private fun dp(value: Int): Int {
-    return (value * resources.displayMetrics.density).toInt()
-  }
+  private fun dp(value: Int): Int =
+    (value * resources.displayMetrics.density).toInt()
 
   companion object {
     private const val ACTION_SHOW = "expo.modules.kmcertonative.action.SHOW_OVERLAY"
@@ -858,27 +724,24 @@ class KmCertoOverlayService : Service() {
         putExtra(EXTRA_PAYLOAD, payload.toJson())
       }
       try {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
           context.startForegroundService(intent)
-        } else {
+        else
           context.startService(intent)
-        }
       } catch (_: Throwable) { }
     }
 
     fun stop(context: Context) {
-      val intent = Intent(context, KmCertoOverlayService::class.java).apply {
-        action = ACTION_HIDE
-      }
-      try { context.startService(intent) } catch (_: Throwable) { }
+      try {
+        context.startService(
+          Intent(context, KmCertoOverlayService::class.java).apply { action = ACTION_HIDE }
+        )
+      } catch (_: Throwable) { }
     }
   }
 }
 
 object KmCertoFormatters {
   private val locale = Locale("pt", "BR")
-
-  fun decimal(value: Double): String {
-    return String.format(locale, "%.2f", value)
-  }
+  fun decimal(value: Double): String = String.format(locale, "%.2f", value)
 }
