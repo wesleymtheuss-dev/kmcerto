@@ -26,6 +26,7 @@ import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.Toast
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import org.json.JSONObject
@@ -249,13 +250,11 @@ data class OfferDecisionData(
 
 object KmCertoOfferParser {
   private val locale = Locale("pt", "BR")
-  private val currencyRegex = Regex("""R\$\s*([0-9]{1,4}(?:[.][0-9]{3})*(?:,[0-9]{2})|[0-9]+(?:[.,][0-9]{1,2})?)""")
-  private val kmRegex = Regex("""(\d{1,3}(?:[.,]\d{1,2})?)\s?km\b""", RegexOption.IGNORE_CASE)
-  private val minuteRegex = Regex("""(\d{1,3})\s?min(?:uto)?s?\b""", RegexOption.IGNORE_CASE)
-  private val explicitTotalKmRegex = Regex("""(?:dist[âa]ncia\s+total|total)\s*(\d{1,3}(?:[.,]\d{1,2})?)\s?km""", RegexOption.IGNORE_CASE)
-  private val explicitTotalMinutesRegex = Regex("""(?:tempo\s+total|total)\s*(\d{1,3})\s?min(?:uto)?s?\b""", RegexOption.IGNORE_CASE)
+  private val currencyRegex = Regex("""R\$?\s*([0-9]{1,3}(?:\.[0-9]{3})*(?:,[0-9]{2})?|[0-9]+(?:[.,][0-9]{1,2})?)""", RegexOption.IGNORE_CASE)
+  private val kmRegex = Regex("""([0-9]+(?:[.,][0-9]+)?)\s*(?:km|quil[ôo]metros?)""", RegexOption.IGNORE_CASE)
+  private val minuteRegex = Regex("""([0-9]+)\s*(?:min|minutos?)""", RegexOption.IGNORE_CASE)
 
-  fun parse(rawText: String, minimumPerKm: Double, sourcePackage: String): OfferDecisionData? {
+  fun parse(context: Context?, rawText: String, minimumPerKm: Double, sourcePackage: String): OfferDecisionData? {
     val normalizedText = rawText.replace("\n", " ").replace(Regex("\\s+"), " ").trim()
     if (normalizedText.isBlank()) return null
 
@@ -263,22 +262,23 @@ object KmCertoOfferParser {
       ?.groupValues
       ?.getOrNull(1)
       ?.let(::parsePtBrNumber)
-      ?: return null
 
-    val distance = explicitTotalKmRegex.find(normalizedText)
-      ?.groupValues
-      ?.getOrNull(1)
-      ?.let(::parsePtBrNumber)
-      ?: selectDistance(kmRegex.findAll(normalizedText).mapNotNull { it.groupValues.getOrNull(1)?.let(::parsePtBrNumber) }.toList())
-      ?: return null
+    if (fare == null || fare <= 0) return null
 
-    val minutes = explicitTotalMinutesRegex.find(normalizedText)
-      ?.groupValues
-      ?.getOrNull(1)
-      ?.toDoubleOrNull()
-      ?: selectMinutes(minuteRegex.findAll(normalizedText).mapNotNull { it.groupValues.getOrNull(1)?.toDoubleOrNull() }.toList())
+    val kmMatches = kmRegex.findAll(normalizedText).mapNotNull { it.groupValues.getOrNull(1)?.let(::parsePtBrNumber) }.toList()
+    val distance = selectDistance(kmMatches)
 
-    if (fare <= 0 || distance <= 0) return null
+    if (distance == null || distance <= 0) {
+        if (context != null) {
+            Handler(Looper.getMainLooper()).post {
+                Toast.makeText(context, "KmCerto: Achou R$ $fare mas não achou a distância (KM).", Toast.LENGTH_LONG).show()
+            }
+        }
+        return null
+    }
+
+    val minMatches = minuteRegex.findAll(normalizedText).mapNotNull { it.groupValues.getOrNull(1)?.toDoubleOrNull() }.toList()
+    val minutes = selectMinutes(minMatches)
 
     val perKm = fare / distance
     val perMinute = if (minutes != null && minutes > 0) fare / minutes else null
@@ -328,31 +328,21 @@ object KmCertoOfferParser {
 
   private fun selectDistance(values: List<Double>): Double? {
     if (values.isEmpty()) return null
-    if (values.size == 1) return values.first()
-    val firstTwo = values.take(2)
-    val sum = firstTwo.sum()
-    return when {
-      sum in 0.5..100.0 -> round2(sum)
-      else -> values.maxByOrNull { it.absoluteValue }
-    }
+    return values.maxOrNull()
   }
 
   private fun selectMinutes(values: List<Double>): Double? {
     if (values.isEmpty()) return null
-    if (values.size == 1) return values.first()
-    val firstTwo = values.take(2)
-    val sum = firstTwo.sum()
-    return when {
-      sum in 1.0..360.0 -> sum
-      else -> values.maxByOrNull { it.absoluteValue }
-    }
+    return values.maxOrNull()
   }
 
   private fun parsePtBrNumber(raw: String): Double {
     val sanitized = raw.trim()
-      .replace(".", "")
-      .replace(',', '.')
-    return sanitized.toDoubleOrNull() ?: Double.NaN
+    return if (sanitized.contains(",")) {
+        sanitized.replace(".", "").replace(",", ".").toDoubleOrNull() ?: Double.NaN
+    } else {
+        sanitized.toDoubleOrNull() ?: Double.NaN
+    }
   }
 
   private fun formatCurrency(value: Double): String {
@@ -385,12 +375,18 @@ class KmCertoAccessibilityService : AccessibilityService() {
     val packageName = event?.packageName?.toString() ?: return
     if (!KmCertoRuntime.supportsPackage(packageName) || !KmCertoRuntime.isMonitoringEnabled(this)) return
 
-    val root = rootInActiveWindow ?: return
-    val text = collectWindowText(root)
+    val root = rootInActiveWindow
+    var text = if (root != null) collectWindowText(root) else ""
+    
+    if (text.isBlank() && event.text != null) {
+        text = event.text.joinToString(" ")
+    }
+    
     if (text.isBlank()) return
 
     val minimumPerKm = KmCertoRuntime.getMinimumPerKm(this)
     val parsed = KmCertoOfferParser.parse(
+      context = this,
       rawText = text,
       minimumPerKm = minimumPerKm,
       sourcePackage = packageName,
