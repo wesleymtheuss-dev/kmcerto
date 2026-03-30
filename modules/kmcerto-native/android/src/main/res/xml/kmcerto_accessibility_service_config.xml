@@ -4,6 +4,5 @@
   android:accessibilityFeedbackType="feedbackGeneric"
   android:accessibilityFlags="flagReportViewIds|flagIncludeNotImportantViews|flagRetrieveInteractiveWindows|flagRequestFilterKeyEvents"
   android:canRetrieveWindowContent="true"
-  android:description="KmCerto monitora ofertas de entrega para calcular viabilidade automaticamente."
   android:notificationTimeout="100"
   android:packageNames="br.com.ifood.driver.app,com.app99.driver,com.ubercab.driver" />
