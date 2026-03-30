@@ -5,6 +5,10 @@ function withKmCertoManifest(config) {
     const manifest = cfg.modResults;
     const app = manifest.manifest.application[0];
 
+    // Garante namespace tools no elemento raiz
+    if (!manifest.manifest.$) manifest.manifest.$ = {};
+    manifest.manifest.$["xmlns:tools"] = "http://schemas.android.com/tools";
+
     if (!manifest.manifest["uses-permission"]) {
       manifest.manifest["uses-permission"] = [];
     }
@@ -23,25 +27,22 @@ function withKmCertoManifest(config) {
     });
 
     if (!app.service) app.service = [];
-
     const accessibilityServiceName = "expo.modules.kmcertonative.KmCertoAccessibilityService";
     app.service = app.service.filter(s => s.$ && s.$["android:name"] !== accessibilityServiceName);
 
-    // Adiciona o serviço SEM usar o arquivo XML externo
     app.service.push({
       $: {
         "android:name": accessibilityServiceName,
         "android:permission": "android.permission.BIND_ACCESSIBILITY_SERVICE",
         "android:exported": "true",
-        "android:label": "KmCerto Monitor"
+        "android:label": "KmCerto Monitor",
+        "tools:replace": "android:label"   // <-- linha nova
       },
       "intent-filter": [
         {
           action: [{ $: { "android:name": "android.accessibilityservice.AccessibilityService" } }]
         }
       ],
-      // Removemos a referência ao @xml/kmcerto_accessibility_service_config aqui
-      // e o Android usará as configurações padrão que definimos no código nativo
     });
 
     return cfg;
