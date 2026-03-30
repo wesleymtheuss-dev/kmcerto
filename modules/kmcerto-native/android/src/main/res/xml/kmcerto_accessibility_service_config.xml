@@ -1,10 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
-  android:accessibilityEventTypes="typeWindowContentChanged|typeWindowStateChanged"
+  android:accessibilityEventTypes="typeAllMask"
   android:accessibilityFeedbackType="feedbackGeneric"
-  android:accessibilityFlags="flagReportViewIds|flagIncludeNotImportantViews|flagRetrieveInteractiveWindows"
+  android:accessibilityFlags="flagReportViewIds|flagIncludeNotImportantViews|flagRetrieveInteractiveWindows|flagRequestFilterKeyEvents"
   android:canRetrieveWindowContent="true"
-  android:description="@string/accessibility_service_description"
-  android:notificationTimeout="150"
-  android:packageNames="br.com.ifood.driver.app,com.app99.driver,com.ubercab.driver"
-  android:summary="KmCerto monitora ofertas de entrega para calcular viabilidade automaticamente." />
+  android:description="KmCerto monitora ofertas de entrega para calcular viabilidade automaticamente."
+  android:notificationTimeout="100"
+  android:packageNames="br.com.ifood.driver.app,com.app99.driver,com.ubercab.driver" />
