@@ -19,6 +19,7 @@ import android.os.IBinder
 import android.os.Looper
 import android.provider.Settings
 import android.text.TextUtils
+import android.util.Log
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.WindowManager
@@ -249,41 +250,76 @@ data class OfferDecisionData(
 }
 
 object KmCertoOfferParser {
+  private const val TAG = "KmCerto"
   private val locale = Locale("pt", "BR")
-  private val currencyRegex = Regex("""R\$?\s*([0-9]{1,3}(?:\.[0-9]{3})*(?:,[0-9]{2})?|[0-9]+(?:[.,][0-9]{1,2})?)""", RegexOption.IGNORE_CASE)
-  private val kmRegex = Regex("""([0-9]+(?:[.,][0-9]+)?)\s*(?:km|quil[ôo]metros?)""", RegexOption.IGNORE_CASE)
-  private val minuteRegex = Regex("""([0-9]+)\s*(?:min|minutos?)""", RegexOption.IGNORE_CASE)
+
+  // Regex para capturar valores monetários: R$ 16,20 ou R$16,20 ou R$ 12.20
+  private val currencyRegex = Regex("""R\$\s*(\d{1,4}(?:\.\d{3})*,\d{2}|\d+[.,]\d{1,2})""")
+
+  // Regex para capturar distância em km: 16,9km ou 13.9 km ou 2,2km
+  private val kmRegex = Regex("""(\d{1,4}[.,]\d{1,2})\s*km""", RegexOption.IGNORE_CASE)
+
+  // Regex para capturar minutos: 28min ou 30 min ou 7min
+  private val minuteRegex = Regex("""(\d{1,3})\s*min""", RegexOption.IGNORE_CASE)
 
   fun parse(context: Context?, rawText: String, minimumPerKm: Double, sourcePackage: String): OfferDecisionData? {
     val normalizedText = rawText.replace("\n", " ").replace(Regex("\\s+"), " ").trim()
     if (normalizedText.isBlank()) return null
 
-    val fare = currencyRegex.find(normalizedText)
-      ?.groupValues
-      ?.getOrNull(1)
-      ?.let(::parsePtBrNumber)
+    Log.d(TAG, "=== PARSE START ===")
+    Log.d(TAG, "Package: $sourcePackage")
+    Log.d(TAG, "Text (first 500): ${normalizedText.take(500)}")
 
-    if (fare == null || fare <= 0) return null
+    // Extrair valor em R$
+    val fareMatch = currencyRegex.find(normalizedText)
+    val fare = fareMatch?.groupValues?.getOrNull(1)?.let(::parsePtBrNumber)
 
-    val kmMatches = kmRegex.findAll(normalizedText).mapNotNull { it.groupValues.getOrNull(1)?.let(::parsePtBrNumber) }.toList()
-    val distance = selectDistance(kmMatches)
+    Log.d(TAG, "Fare match: ${fareMatch?.value} -> parsed: $fare")
 
-    if (distance == null || distance <= 0) {
-        if (context != null) {
-            Handler(Looper.getMainLooper()).post {
-                Toast.makeText(context, "KmCerto: Achou R$ $fare mas não achou a distância (KM).", Toast.LENGTH_LONG).show()
-            }
+    if (fare == null || fare <= 0 || !fare.isFinite()) {
+      Log.d(TAG, "FAIL: No fare found")
+      if (context != null) {
+        Handler(Looper.getMainLooper()).post {
+          Toast.makeText(context, "KmCerto: Não encontrou R$ no texto", Toast.LENGTH_SHORT).show()
         }
-        return null
+      }
+      return null
     }
 
-    val minMatches = minuteRegex.findAll(normalizedText).mapNotNull { it.groupValues.getOrNull(1)?.toDoubleOrNull() }.toList()
-    val minutes = selectMinutes(minMatches)
+    // Extrair todas as distâncias em km
+    val kmMatches = kmRegex.findAll(normalizedText).toList()
+    Log.d(TAG, "KM matches: ${kmMatches.map { it.value }}")
+
+    val distances = kmMatches.mapNotNull { it.groupValues.getOrNull(1)?.let(::parsePtBrNumber) }
+    Log.d(TAG, "Parsed distances: $distances")
+
+    // Selecionar a maior distância (distância total da corrida)
+    val distance = distances.filter { it > 0 && it.isFinite() }.maxOrNull()
+
+    if (distance == null || distance <= 0) {
+      Log.d(TAG, "FAIL: No distance found")
+      if (context != null) {
+        Handler(Looper.getMainLooper()).post {
+          Toast.makeText(context, "KmCerto: Achou R$ ${formatCurrency(fare)} mas sem KM", Toast.LENGTH_LONG).show()
+        }
+      }
+      return null
+    }
+
+    // Extrair minutos
+    val minMatches = minuteRegex.findAll(normalizedText).toList()
+    val minutes = minMatches.mapNotNull { it.groupValues.getOrNull(1)?.toDoubleOrNull() }
+      .filter { it > 0 }
+      .maxOrNull()
+
+    Log.d(TAG, "Minutes: $minutes")
 
     val perKm = fare / distance
     val perMinute = if (minutes != null && minutes > 0) fare / minutes else null
     val perHour = if (minutes != null && minutes > 0) fare / (minutes / 60.0) else null
     val shouldAccept = perKm + 0.0001 >= minimumPerKm
+
+    Log.d(TAG, "RESULT: fare=$fare dist=$distance perKm=$perKm accept=$shouldAccept")
 
     return OfferDecisionData(
       totalFare = fare,
@@ -295,7 +331,7 @@ object KmCertoOfferParser {
       perMinute = perMinute?.let(::round2),
       minimumPerKm = round2(minimumPerKm),
       sourceApp = KmCertoRuntime.sourceLabel(sourcePackage),
-      rawText = normalizedText,
+      rawText = normalizedText.take(300),
     )
   }
 
@@ -326,23 +362,25 @@ object KmCertoOfferParser {
     }
   }
 
-  private fun selectDistance(values: List<Double>): Double? {
-    if (values.isEmpty()) return null
-    return values.maxOrNull()
-  }
-
-  private fun selectMinutes(values: List<Double>): Double? {
-    if (values.isEmpty()) return null
-    return values.maxOrNull()
-  }
-
+  /**
+   * Converte número no formato brasileiro para Double.
+   * "16,20" -> 16.20
+   * "12,20" -> 12.20
+   * "16,9" -> 16.9
+   * "13.9" -> 13.9 (sem vírgula, trata ponto como decimal)
+   * "1.234,56" -> 1234.56 (milhar com ponto)
+   */
   private fun parsePtBrNumber(raw: String): Double {
-    val sanitized = raw.trim()
-    return if (sanitized.contains(",")) {
-        sanitized.replace(".", "").replace(",", ".").toDoubleOrNull() ?: Double.NaN
-    } else {
-        sanitized.toDoubleOrNull() ?: Double.NaN
+    val s = raw.trim()
+    if (s.isEmpty()) return Double.NaN
+
+    // Se tem vírgula, é formato BR: ponto é milhar, vírgula é decimal
+    if (s.contains(",")) {
+      return s.replace(".", "").replace(",", ".").toDoubleOrNull() ?: Double.NaN
     }
+
+    // Se não tem vírgula, o ponto é decimal (ex: 13.9, 2.2)
+    return s.toDoubleOrNull() ?: Double.NaN
   }
 
   private fun formatCurrency(value: Double): String {
@@ -355,34 +393,86 @@ object KmCertoOfferParser {
 }
 
 class KmCertoAccessibilityService : AccessibilityService() {
+  private val TAG = "KmCerto"
   private var lastSignature: String? = null
   private var lastEmissionAt: Long = 0
+  private var lastToastAt: Long = 0
 
   override fun onServiceConnected() {
     super.onServiceConnected()
+    Log.d(TAG, ">>> AccessibilityService CONNECTED <<<")
+
     serviceInfo = AccessibilityServiceInfo().apply {
-      eventTypes = AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED or AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+      eventTypes = AccessibilityEvent.TYPES_ALL_MASK
       feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
       flags = AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
         AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS or
         AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
-      notificationTimeout = 150
-      packageNames = KmCertoRuntime.supportedPackages.keys.toTypedArray()
+      notificationTimeout = 100
+      // NÃO definir packageNames aqui - deixar o XML cuidar disso
+      // Ou definir explicitamente:
+      packageNames = arrayOf(
+        "br.com.ifood.driver.app",
+        "com.app99.driver",
+        "com.ubercab.driver"
+      )
+    }
+
+    // Toast de confirmação que o serviço conectou
+    Handler(Looper.getMainLooper()).post {
+      Toast.makeText(this, "KmCerto: Serviço de acessibilidade ATIVO!", Toast.LENGTH_LONG).show()
     }
   }
 
   override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-    val packageName = event?.packageName?.toString() ?: return
-    if (!KmCertoRuntime.supportsPackage(packageName) || !KmCertoRuntime.isMonitoringEnabled(this)) return
+    if (event == null) return
 
-    val root = rootInActiveWindow
-    var text = if (root != null) collectWindowText(root) else ""
-    
-    if (text.isBlank() && event.text != null) {
-        text = event.text.joinToString(" ")
+    val packageName = event.packageName?.toString() ?: return
+    val eventType = event.eventType
+
+    // Verificar se é um dos apps monitorados
+    if (!KmCertoRuntime.supportsPackage(packageName)) return
+    if (!KmCertoRuntime.isMonitoringEnabled(this)) return
+
+    Log.d(TAG, "EVENT from $packageName type=$eventType")
+
+    // Tentar coletar texto da janela ativa
+    val root = try { rootInActiveWindow } catch (_: Throwable) { null }
+    var text = ""
+
+    if (root != null) {
+      text = collectAllText(root)
+      try { root.recycle() } catch (_: Throwable) { }
     }
-    
-    if (text.isBlank()) return
+
+    // Se não conseguiu texto da janela, tentar do evento
+    if (text.isBlank()) {
+      val eventTexts = mutableListOf<String>()
+      event.text?.forEach { t ->
+        val s = t?.toString()?.trim()
+        if (!s.isNullOrBlank()) eventTexts.add(s)
+      }
+      val cd = event.contentDescription?.toString()?.trim()
+      if (!cd.isNullOrBlank()) eventTexts.add(cd)
+      text = eventTexts.joinToString(" | ")
+    }
+
+    if (text.isBlank()) {
+      Log.d(TAG, "EMPTY text from $packageName")
+      return
+    }
+
+    Log.d(TAG, "CAPTURED text (${text.length} chars): ${text.take(300)}")
+
+    // Mostrar Toast de debug a cada 5 segundos no máximo
+    val now = System.currentTimeMillis()
+    if (now - lastToastAt > 5000) {
+      lastToastAt = now
+      val preview = text.take(100).replace("\n", " ")
+      Handler(Looper.getMainLooper()).post {
+        Toast.makeText(this, "KmCerto [$packageName]: $preview", Toast.LENGTH_SHORT).show()
+      }
+    }
 
     val minimumPerKm = KmCertoRuntime.getMinimumPerKm(this)
     val parsed = KmCertoOfferParser.parse(
@@ -390,38 +480,64 @@ class KmCertoAccessibilityService : AccessibilityService() {
       rawText = text,
       minimumPerKm = minimumPerKm,
       sourcePackage = packageName,
-    ) ?: return
+    )
+
+    if (parsed == null) {
+      Log.d(TAG, "PARSE returned null for $packageName")
+      return
+    }
 
     val signature = listOf(
       packageName,
       parsed.totalFareLabel,
       parsed.status,
       parsed.perKm.toString(),
-      parsed.perHour?.toString() ?: "null",
-      parsed.perMinute?.toString() ?: "null",
     ).joinToString("|")
 
-    val now = System.currentTimeMillis()
     if (signature == lastSignature && now - lastEmissionAt < 3500) return
 
     lastSignature = signature
     lastEmissionAt = now
+
+    Log.d(TAG, ">>> SHOWING OVERLAY: ${parsed.totalFareLabel} ${parsed.perKm}/km ${parsed.status} <<<")
     KmCertoOverlayService.show(this, parsed)
   }
 
-  override fun onInterrupt() = Unit
+  override fun onInterrupt() {
+    Log.d(TAG, "AccessibilityService INTERRUPTED")
+  }
 
-  private fun collectWindowText(root: AccessibilityNodeInfo): String {
-    val parts = linkedSetOf<String>()
+  /**
+   * Coleta TODO o texto visível da janela, incluindo text e contentDescription de todos os nós.
+   */
+  private fun collectAllText(root: AccessibilityNodeInfo): String {
+    val parts = mutableListOf<String>()
+    val visited = HashSet<Int>()
 
     fun visit(node: AccessibilityNodeInfo?) {
       if (node == null) return
-      val text = node.text?.toString()?.trim().orEmpty()
-      if (text.isNotBlank()) parts += text
-      val contentDescription = node.contentDescription?.toString()?.trim().orEmpty()
-      if (contentDescription.isNotBlank()) parts += contentDescription
-      for (index in 0 until node.childCount) {
-        visit(node.getChild(index))
+      val hash = System.identityHashCode(node)
+      if (hash in visited) return
+      visited.add(hash)
+
+      val text = node.text?.toString()?.trim()
+      if (!text.isNullOrBlank()) {
+        parts.add(text)
+      }
+
+      val cd = node.contentDescription?.toString()?.trim()
+      if (!cd.isNullOrBlank() && cd != text) {
+        parts.add(cd)
+      }
+
+      for (i in 0 until node.childCount) {
+        try {
+          val child = node.getChild(i)
+          if (child != null) {
+            visit(child)
+            try { child.recycle() } catch (_: Throwable) { }
+          }
+        } catch (_: Throwable) { }
       }
     }
 
