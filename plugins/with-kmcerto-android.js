@@ -27,6 +27,7 @@ function withKmCertoManifest(config) {
     const accessibilityServiceName = "expo.modules.kmcertonative.KmCertoAccessibilityService";
     app.service = app.service.filter(s => s.$ && s.$["android:name"] !== accessibilityServiceName);
 
+    // Adiciona o serviço SEM usar o arquivo XML externo
     app.service.push({
       $: {
         "android:name": accessibilityServiceName,
@@ -39,14 +40,8 @@ function withKmCertoManifest(config) {
           action: [{ $: { "android:name": "android.accessibilityservice.AccessibilityService" } }]
         }
       ],
-      "meta-data": [
-        {
-          $: {
-            "android:name": "android.accessibilityservice",
-            "android:resource": "@xml/kmcerto_accessibility_service_config"
-          }
-        }
-      ]
+      // Removemos a referência ao @xml/kmcerto_accessibility_service_config aqui
+      // e o Android usará as configurações padrão que definimos no código nativo
     });
 
     return cfg;
