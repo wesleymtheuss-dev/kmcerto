@@ -253,16 +253,28 @@ object KmCertoOfferParser {
   private const val TAG = "KmCerto"
   private val locale = Locale("pt", "BR")
 
-  // Regex para capturar valores monetários: R$ 16,20 ou R$16,20 ou R$ 12.20
-  private val currencyRegex = Regex("""R\$\s*(\d{1,4}(?:\.\d{3})*,\d{2}|\d+[.,]\d{1,2})""")
+  // === REGEX PRINCIPAL: R$ seguido de valor ===
+  // Aceita: R$ 16,20 | R$16,20 | R$ 32.79 | R$11,66
+  // Também aceita separadores como " | ", espaços, tabs, etc entre R$ e o número
+  private val currencyRegex = Regex(
+    """R\$\s*[|\s]*(\d{1,4}(?:\.\d{3})*,\d{2}|\d+[.,]\d{1,2})"""
+  )
 
-  // Regex para capturar distância em km: 16,9km ou 13.9 km ou 2,2km
+  // === REGEX FALLBACK: valor monetário sem R$ ===
+  // Para quando o "R$" está em um nó separado do número
+  // Captura números no formato XX,XX (2 casas decimais com vírgula) que parecem valores monetários
+  private val bareMoneyRegex = Regex(
+    """(?<!\d)(\d{1,4},\d{2})(?!\d)"""
+  )
+
+  // Regex para capturar distância em km: 16,9km ou 13.9 km ou 2,2km ou 29.3 km
   private val kmRegex = Regex("""(\d{1,4}[.,]\d{1,2})\s*km""", RegexOption.IGNORE_CASE)
 
-  // Regex para capturar minutos: 28min ou 30 min ou 7min
+  // Regex para capturar minutos: 28min ou 30 min ou 7min ou 48 min
   private val minuteRegex = Regex("""(\d{1,3})\s*min""", RegexOption.IGNORE_CASE)
 
   fun parse(context: Context?, rawText: String, minimumPerKm: Double, sourcePackage: String): OfferDecisionData? {
+    // Normalizar: remover quebras de linha, múltiplos espaços
     val normalizedText = rawText.replace("\n", " ").replace(Regex("\\s+"), " ").trim()
     if (normalizedText.isBlank()) return null
 
@@ -270,56 +282,111 @@ object KmCertoOfferParser {
     Log.d(TAG, "Package: $sourcePackage")
     Log.d(TAG, "Text (first 500): ${normalizedText.take(500)}")
 
-    // Extrair valor em R$
-    val fareMatch = currencyRegex.find(normalizedText)
-    val fare = fareMatch?.groupValues?.getOrNull(1)?.let(::parsePtBrNumber)
-
-    Log.d(TAG, "Fare match: ${fareMatch?.value} -> parsed: $fare")
-
-    if (fare == null || fare <= 0 || !fare.isFinite()) {
-      Log.d(TAG, "FAIL: No fare found")
-      if (context != null) {
-        Handler(Looper.getMainLooper()).post {
-          Toast.makeText(context, "KmCerto: Não encontrou R$ no texto", Toast.LENGTH_SHORT).show()
-        }
-      }
-      return null
-    }
-
-    // Extrair todas as distâncias em km
+    // ========================================================
+    // PASSO 1: Extrair distância em KM (precisa ter km para ser oferta)
+    // ========================================================
     val kmMatches = kmRegex.findAll(normalizedText).toList()
     Log.d(TAG, "KM matches: ${kmMatches.map { it.value }}")
 
     val distances = kmMatches.mapNotNull { it.groupValues.getOrNull(1)?.let(::parsePtBrNumber) }
+      .filter { it > 0 && it.isFinite() }
     Log.d(TAG, "Parsed distances: $distances")
 
-    // Selecionar a maior distância (distância total da corrida)
-    val distance = distances.filter { it > 0 && it.isFinite() }.maxOrNull()
+    // Se não tem KM, não é uma oferta de corrida - sair silenciosamente
+    if (distances.isEmpty()) {
+      Log.d(TAG, "No KM found - not a ride offer, skipping")
+      return null
+    }
 
-    if (distance == null || distance <= 0) {
-      Log.d(TAG, "FAIL: No distance found")
+    // Usar a MAIOR distância (distância total)
+    val distance = distances.maxOrNull()!!
+
+    // ========================================================
+    // PASSO 2: Extrair valor em R$
+    // ========================================================
+    var fare: Double? = null
+    var fareSource = ""
+
+    // Tentativa 1: Regex principal com R$
+    val fareMatch = currencyRegex.find(normalizedText)
+    if (fareMatch != null) {
+      fare = fareMatch.groupValues.getOrNull(1)?.let(::parsePtBrNumber)
+      fareSource = "regex R$"
+      Log.d(TAG, "Fare (R$ regex): '${fareMatch.value}' -> $fare")
+    }
+
+    // Tentativa 2: Se não achou com R$, procurar "R$" e número em nós separados
+    // O texto vem como "nó1 | nó2 | nó3", então R$ pode estar em um nó e o valor em outro
+    if (fare == null || fare <= 0 || !fare.isFinite()) {
+      // Verificar se existe "R$" em algum lugar do texto
+      val hasRealSign = normalizedText.contains("R$") || normalizedText.contains("R\$")
+      if (hasRealSign) {
+        // Procurar o primeiro número com formato monetário DEPOIS do R$
+        val rIdx = normalizedText.indexOf("R$")
+        if (rIdx >= 0) {
+          val afterR = normalizedText.substring(rIdx + 2)
+          val bareMatch = bareMoneyRegex.find(afterR)
+          if (bareMatch != null) {
+            fare = parsePtBrNumber(bareMatch.groupValues[1])
+            fareSource = "R$ separado"
+            Log.d(TAG, "Fare (R$ separado): '${bareMatch.value}' -> $fare")
+          }
+        }
+      }
+    }
+
+    // Tentativa 3: Fallback total - procurar qualquer valor XX,XX no texto
+    // Filtrar valores que fazem sentido como preço de corrida (entre 3 e 500)
+    if (fare == null || fare <= 0 || !fare.isFinite()) {
+      val allBareValues = bareMoneyRegex.findAll(normalizedText)
+        .mapNotNull { it.groupValues.getOrNull(1)?.let(::parsePtBrNumber) }
+        .filter { it in 3.0..500.0 }
+        .toList()
+      Log.d(TAG, "Bare money values found: $allBareValues")
+
+      if (allBareValues.isNotEmpty()) {
+        // Pegar o primeiro valor razoável (geralmente o valor da corrida aparece primeiro)
+        fare = allBareValues.first()
+        fareSource = "fallback bare"
+        Log.d(TAG, "Fare (fallback): $fare")
+      }
+    }
+
+    // Se mesmo assim não achou, mostrar debug
+    if (fare == null || fare <= 0 || !fare.isFinite()) {
+      Log.d(TAG, "FAIL: No fare found at all")
       if (context != null) {
+        val preview = normalizedText.take(150)
         Handler(Looper.getMainLooper()).post {
-          Toast.makeText(context, "KmCerto: Achou R$ ${formatCurrency(fare)} mas sem KM", Toast.LENGTH_LONG).show()
+          Toast.makeText(context, "KmCerto debug: $preview", Toast.LENGTH_LONG).show()
         }
       }
       return null
     }
 
-    // Extrair minutos
+    // ========================================================
+    // PASSO 3: Extrair minutos
+    // ========================================================
     val minMatches = minuteRegex.findAll(normalizedText).toList()
     val minutes = minMatches.mapNotNull { it.groupValues.getOrNull(1)?.toDoubleOrNull() }
       .filter { it > 0 }
-      .maxOrNull()
+      .let { values ->
+        if (values.isEmpty()) null
+        else if (values.size == 1) values.first()
+        else values.sum() // Somar pickup + dropoff
+      }
 
     Log.d(TAG, "Minutes: $minutes")
 
+    // ========================================================
+    // PASSO 4: Calcular métricas
+    // ========================================================
     val perKm = fare / distance
     val perMinute = if (minutes != null && minutes > 0) fare / minutes else null
     val perHour = if (minutes != null && minutes > 0) fare / (minutes / 60.0) else null
     val shouldAccept = perKm + 0.0001 >= minimumPerKm
 
-    Log.d(TAG, "RESULT: fare=$fare dist=$distance perKm=$perKm accept=$shouldAccept")
+    Log.d(TAG, "RESULT: fare=$fare dist=$distance perKm=$perKm accept=$shouldAccept fareSource=$fareSource")
 
     return OfferDecisionData(
       totalFare = fare,
@@ -396,7 +463,7 @@ class KmCertoAccessibilityService : AccessibilityService() {
   private val TAG = "KmCerto"
   private var lastSignature: String? = null
   private var lastEmissionAt: Long = 0
-  private var lastToastAt: Long = 0
+  private var lastDebugToastAt: Long = 0
 
   override fun onServiceConnected() {
     super.onServiceConnected()
@@ -409,8 +476,6 @@ class KmCertoAccessibilityService : AccessibilityService() {
         AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS or
         AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
       notificationTimeout = 100
-      // NÃO definir packageNames aqui - deixar o XML cuidar disso
-      // Ou definir explicitamente:
       packageNames = arrayOf(
         "br.com.ifood.driver.app",
         "com.app99.driver",
@@ -418,7 +483,6 @@ class KmCertoAccessibilityService : AccessibilityService() {
       )
     }
 
-    // Toast de confirmação que o serviço conectou
     Handler(Looper.getMainLooper()).post {
       Toast.makeText(this, "KmCerto: Serviço de acessibilidade ATIVO!", Toast.LENGTH_LONG).show()
     }
@@ -428,56 +492,74 @@ class KmCertoAccessibilityService : AccessibilityService() {
     if (event == null) return
 
     val packageName = event.packageName?.toString() ?: return
-    val eventType = event.eventType
 
     // Verificar se é um dos apps monitorados
     if (!KmCertoRuntime.supportsPackage(packageName)) return
     if (!KmCertoRuntime.isMonitoringEnabled(this)) return
 
-    Log.d(TAG, "EVENT from $packageName type=$eventType")
+    Log.d(TAG, "EVENT from $packageName type=${event.eventType}")
 
-    // Tentar coletar texto da janela ativa
+    // ========================================================
+    // COLETA DE TEXTO: Múltiplas estratégias
+    // ========================================================
+    val allTexts = mutableListOf<String>()
+
+    // Estratégia 1: rootInActiveWindow - percorre toda a árvore de views
     val root = try { rootInActiveWindow } catch (_: Throwable) { null }
-    var text = ""
-
     if (root != null) {
-      text = collectAllText(root)
+      val windowTexts = collectAllText(root)
+      if (windowTexts.isNotBlank()) {
+        allTexts.add(windowTexts)
+      }
       try { root.recycle() } catch (_: Throwable) { }
     }
 
-    // Se não conseguiu texto da janela, tentar do evento
-    if (text.isBlank()) {
-      val eventTexts = mutableListOf<String>()
-      event.text?.forEach { t ->
-        val s = t?.toString()?.trim()
-        if (!s.isNullOrBlank()) eventTexts.add(s)
+    // Estratégia 2: Texto do evento
+    event.text?.forEach { t ->
+      val s = t?.toString()?.trim()
+      if (!s.isNullOrBlank() && s !in allTexts) allTexts.add(s)
+    }
+    val cd = event.contentDescription?.toString()?.trim()
+    if (!cd.isNullOrBlank() && cd !in allTexts) allTexts.add(cd)
+
+    // Estratégia 3: source do evento
+    val source = try { event.source } catch (_: Throwable) { null }
+    if (source != null) {
+      val sourceText = collectAllText(source)
+      if (sourceText.isNotBlank() && sourceText !in allTexts) {
+        allTexts.add(sourceText)
       }
-      val cd = event.contentDescription?.toString()?.trim()
-      if (!cd.isNullOrBlank()) eventTexts.add(cd)
-      text = eventTexts.joinToString(" | ")
+      try { source.recycle() } catch (_: Throwable) { }
     }
 
-    if (text.isBlank()) {
+    val combinedText = allTexts.joinToString(" | ")
+
+    if (combinedText.isBlank()) {
       Log.d(TAG, "EMPTY text from $packageName")
       return
     }
 
-    Log.d(TAG, "CAPTURED text (${text.length} chars): ${text.take(300)}")
+    Log.d(TAG, "CAPTURED (${combinedText.length} chars): ${combinedText.take(400)}")
 
-    // Mostrar Toast de debug a cada 5 segundos no máximo
+    // ========================================================
+    // DEBUG TOAST: Mostrar texto capturado a cada 8 segundos
+    // ========================================================
     val now = System.currentTimeMillis()
-    if (now - lastToastAt > 5000) {
-      lastToastAt = now
-      val preview = text.take(100).replace("\n", " ")
+    if (now - lastDebugToastAt > 8000) {
+      lastDebugToastAt = now
+      val preview = combinedText.take(120).replace("\n", " ")
       Handler(Looper.getMainLooper()).post {
-        Toast.makeText(this, "KmCerto [$packageName]: $preview", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, "KmCerto [$packageName]:\n$preview", Toast.LENGTH_LONG).show()
       }
     }
 
+    // ========================================================
+    // PARSE: Tentar extrair dados da oferta
+    // ========================================================
     val minimumPerKm = KmCertoRuntime.getMinimumPerKm(this)
     val parsed = KmCertoOfferParser.parse(
       context = this,
-      rawText = text,
+      rawText = combinedText,
       minimumPerKm = minimumPerKm,
       sourcePackage = packageName,
     )
@@ -487,6 +569,7 @@ class KmCertoAccessibilityService : AccessibilityService() {
       return
     }
 
+    // Deduplicação: não mostrar overlay repetido
     val signature = listOf(
       packageName,
       parsed.totalFareLabel,
@@ -508,17 +591,14 @@ class KmCertoAccessibilityService : AccessibilityService() {
   }
 
   /**
-   * Coleta TODO o texto visível da janela, incluindo text e contentDescription de todos os nós.
+   * Coleta TODO o texto visível da árvore de nós, incluindo text e contentDescription.
+   * Junta com espaço simples (não com " | ") para manter R$ e valor juntos quando possível.
    */
   private fun collectAllText(root: AccessibilityNodeInfo): String {
     val parts = mutableListOf<String>()
-    val visited = HashSet<Int>()
 
     fun visit(node: AccessibilityNodeInfo?) {
       if (node == null) return
-      val hash = System.identityHashCode(node)
-      if (hash in visited) return
-      visited.add(hash)
 
       val text = node.text?.toString()?.trim()
       if (!text.isNullOrBlank()) {
@@ -542,7 +622,10 @@ class KmCertoAccessibilityService : AccessibilityService() {
     }
 
     visit(root)
-    return parts.joinToString(" | ")
+
+    // IMPORTANTE: Juntar com espaço simples " " em vez de " | "
+    // Isso mantém "R$" e "32,79" juntos como "R$ 32,79" quando estão em nós adjacentes
+    return parts.joinToString(" ")
   }
 
   companion object {
