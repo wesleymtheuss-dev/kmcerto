@@ -17,6 +17,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
 import android.provider.Settings
 import android.text.TextUtils
 import android.util.Log
@@ -286,7 +287,9 @@ object KmCertoOfferParser {
       Log.d(TAG, "FAIL: No fare found")
       context?.let {
         Handler(Looper.getMainLooper()).post {
-          Toast.makeText(it, "KmCerto: Não encontrou R\$ no texto", Toast.LENGTH_SHORT).show()
+          Toast.makeText(it,
+            "KmCerto: Não encontrou R\$ no texto",
+            Toast.LENGTH_SHORT).show()
         }
       }
       return null
@@ -392,6 +395,68 @@ class KmCertoAccessibilityService : AccessibilityService() {
   private var lastSignature: String? = null
   private var lastEmissionAt: Long = 0
   private var lastToastAt: Long = 0
+  private var wakeLock: PowerManager.WakeLock? = null
+
+  // =====================================================================
+  // MUDANÇA 1: Foreground notification para manter o serviço VIVO
+  // =====================================================================
+  private fun startForegroundKeepAlive() {
+    try {
+      val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        val channel = NotificationChannel(
+          KEEP_ALIVE_CHANNEL_ID,
+          "KmCerto Monitoramento",
+          NotificationManager.IMPORTANCE_LOW
+        ).apply {
+          description = "Mantém o KmCerto ativo para monitorar corridas."
+          setShowBadge(false)
+        }
+        manager.createNotificationChannel(channel)
+      }
+      val notification = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        Notification.Builder(this, KEEP_ALIVE_CHANNEL_ID)
+      } else {
+        @Suppress("DEPRECATION") Notification.Builder(this)
+      }.setContentTitle("KmCerto monitorando")
+        .setContentText("Analisando ofertas de corrida automaticamente.")
+        .setSmallIcon(android.R.drawable.ic_dialog_info)
+        .setOngoing(true)
+        .build()
+      startForeground(KEEP_ALIVE_NOTIFICATION_ID, notification)
+      Log.d(TAG, "Foreground keep-alive notification STARTED")
+    } catch (e: Throwable) {
+      Log.e(TAG, "Failed to start foreground: ${e.message}")
+    }
+  }
+
+  // =====================================================================
+  // MUDANÇA 2: WakeLock parcial para evitar que a CPU durma
+  // =====================================================================
+  private fun acquireWakeLock() {
+    try {
+      val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+      wakeLock = pm.newWakeLock(
+        PowerManager.PARTIAL_WAKE_LOCK,
+        "KmCerto::AccessibilityWakeLock"
+      ).apply {
+        acquire()
+      }
+      Log.d(TAG, "WakeLock ACQUIRED")
+    } catch (e: Throwable) {
+      Log.e(TAG, "Failed to acquire WakeLock: ${e.message}")
+    }
+  }
+
+  private fun releaseWakeLock() {
+    try {
+      wakeLock?.let {
+        if (it.isHeld) it.release()
+      }
+      wakeLock = null
+      Log.d(TAG, "WakeLock RELEASED")
+    } catch (_: Throwable) { }
+  }
 
   override fun onServiceConnected() {
     super.onServiceConnected()
@@ -409,8 +474,23 @@ class KmCertoAccessibilityService : AccessibilityService() {
         "com.ubercab.driver",
       )
     }
+
+    // MUDANÇA: Iniciar foreground + wakelock para manter vivo
+    startForegroundKeepAlive()
+    acquireWakeLock()
+
     Handler(Looper.getMainLooper()).post {
-      Toast.makeText(this, "KmCerto: Serviço de acessibilidade ATIVO!", Toast.LENGTH_LONG).show()
+      Toast.makeText(this, "KmCerto: Serviço ATIVO e protegido!", Toast.LENGTH_LONG).show()
+    }
+  }
+
+  override fun onDestroy() {
+    releaseWakeLock()
+    super.onDestroy()
+    Log.d(TAG, ">>> AccessibilityService DESTROYED <<<")
+    // Tentar reiniciar se foi morto
+    Handler(Looper.getMainLooper()).post {
+      Toast.makeText(applicationContext, "KmCerto: Serviço foi encerrado!", Toast.LENGTH_LONG).show()
     }
   }
 
@@ -422,23 +502,35 @@ class KmCertoAccessibilityService : AccessibilityService() {
 
     Log.d(TAG, "EVENT from $packageName type=${event.eventType}")
 
+    // =====================================================================
+    // COLETA DE TEXTO: root + event.text + event.source
+    // =====================================================================
+    val allParts = mutableListOf<String>()
+
+    // Estratégia 1: rootInActiveWindow (árvore completa)
     val root = try { rootInActiveWindow } catch (_: Throwable) { null }
-    var text = ""
     if (root != null) {
-      text = collectAllText(root)
+      val rootText = collectAllText(root)
+      if (rootText.isNotBlank()) allParts.add(rootText)
       try { root.recycle() } catch (_: Throwable) { }
     }
 
-    // Fallback: texto do evento
-    if (text.isBlank()) {
-      val parts = mutableListOf<String>()
-      event.text?.forEach { t ->
-        t?.toString()?.trim()?.takeIf { it.isNotBlank() }?.let { parts.add(it) }
-      }
-      event.contentDescription?.toString()?.trim()
-        ?.takeIf { it.isNotBlank() }?.let { parts.add(it) }
-      text = parts.joinToString(" | ")
+    // Estratégia 2: texto do evento
+    event.text?.forEach { t ->
+      t?.toString()?.trim()?.takeIf { it.isNotBlank() }?.let { allParts.add(it) }
     }
+    event.contentDescription?.toString()?.trim()
+      ?.takeIf { it.isNotBlank() }?.let { allParts.add(it) }
+
+    // Estratégia 3: source do evento (sub-árvore)
+    val source = try { event.source } catch (_: Throwable) { null }
+    if (source != null) {
+      val sourceText = collectAllText(source)
+      if (sourceText.isNotBlank() && sourceText !in allParts) allParts.add(sourceText)
+      try { source.recycle() } catch (_: Throwable) { }
+    }
+
+    val text = allParts.joinToString(" | ")
 
     if (text.isBlank()) {
       Log.d(TAG, "EMPTY text from $packageName")
@@ -509,6 +601,9 @@ class KmCertoAccessibilityService : AccessibilityService() {
   }
 
   companion object {
+    private const val KEEP_ALIVE_CHANNEL_ID = "kmcerto_keep_alive"
+    private const val KEEP_ALIVE_NOTIFICATION_ID = 7072
+
     fun isEnabled(context: Context): Boolean {
       val enabled = Settings.Secure.getString(
         context.contentResolver,
